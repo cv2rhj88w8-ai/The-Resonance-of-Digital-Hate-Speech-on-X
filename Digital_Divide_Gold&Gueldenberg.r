@@ -2,28 +2,30 @@
 # DeTox dataset: discrimination types & engagement analysis
 # Dataset: Demus et al. (2025)
 # The code was sorted and optimized by AI
+# Authors Cedric Gold & Leander Güldenberg
 # ============================================================
 
 # install.packages(c("DBI", "RSQLite", "dplyr", "MASS", "lmtest", "car",
-#     "sandwich", "ggplot2"))
+#                    "sandwich", "ggplot2"))
 
 library(DBI)
 library(RSQLite)
-library(dplyr) 
-library(MASS)  
+library(dplyr)
+library(MASS)
 library(lmtest)
 library(car)
 library(sandwich)
-library(ggplot2)  
+library(ggplot2)
 
 # ------------------------------------------------------------
-# 0. Helpers
+# 0. Helpers & shared definitions
 # ------------------------------------------------------------
 
 # Poisson dispersion statistic (close to 1 => Poisson adequate)
 dispersion_stat <- function(model) model$deviance / model$df.residual
 
-# Descriptive engagement statistics by group
+# Descriptive engagement statistics by group (main analysis version,
+# tidy-eval calling convention; used in sections 8 and 9)
 summarise_engagement <- function(df, group_col) {
   df %>%
     group_by({{ group_col }}) %>%
@@ -37,6 +39,28 @@ summarise_engagement <- function(df, group_col) {
       median_replies  = median(reply_count, na.rm = TRUE),
       mean_quotes     = mean(quote_count, na.rm = TRUE),
       median_quotes   = median(quote_count, na.rm = TRUE),
+      .groups = "drop"
+    )
+}
+
+# Descriptive statistics by group (descriptive-tables version;
+# takes the grouping variable as a string and adds comment-age
+# columns; used in section 4)
+summarise_engagement_desc <- function(data, grouping_variable) {
+  data %>%
+    group_by(.data[[grouping_variable]]) %>%
+    summarise(
+      n_comments      = n(),
+      mean_likes      = mean(like_count, na.rm = TRUE),
+      median_likes    = median(like_count, na.rm = TRUE),
+      mean_retweets   = mean(retweet_count, na.rm = TRUE),
+      median_retweets = median(retweet_count, na.rm = TRUE),
+      mean_replies    = mean(reply_count, na.rm = TRUE),
+      median_replies  = median(reply_count, na.rm = TRUE),
+      mean_quotes     = mean(quote_count, na.rm = TRUE),
+      median_quotes   = median(quote_count, na.rm = TRUE),
+      mean_age_days   = mean(age_days, na.rm = TRUE),
+      median_age_days = median(age_days, na.rm = TRUE),
       .groups = "drop"
     )
 }
@@ -92,7 +116,7 @@ filter_complete_engagement <- function(df) {
 # Parse SQLite TIMESTAMP robustly: ISO text or epoch seconds
 parse_ts <- function(x) {
   if (is.numeric(x)) as.POSIXct(x, origin = "1970-01-01", tz = "UTC")
-  else               as.POSIXct(x, tz = "UTC")
+  else as.POSIXct(x, tz = "UTC")
 }
 
 # Add posting time, exposure (comment age) and conversation cluster id.
@@ -100,11 +124,11 @@ parse_ts <- function(x) {
 add_exposure <- function(df, collection_time) {
   df %>%
     mutate(
-      posted_at  = parse_ts(date),
-      age_days   = as.numeric(difftime(collection_time, posted_at,
-                                       units = "days")),
-      age_days   = pmax(age_days, 1/24),  # floor at 1 hour -> no log(0)
-      log_age    = log(age_days),
+      posted_at = parse_ts(date),
+      age_days  = as.numeric(difftime(collection_time, posted_at,
+                                      units = "days")),
+      age_days  = pmax(age_days, 1/24), # floor at 1 hour -> no log(0)
+      log_age   = log(age_days),
       # comments without a conversation become singleton clusters
       cluster_id = ifelse(is.na(conv_id),
                           paste0("single_", c_id),
@@ -127,7 +151,7 @@ tidy_nb <- function(model, hypothesis, outcome) {
     irr         = exp(co[, "Estimate"]),
     irr_ci_low  = exp(ci[, 1]),
     irr_ci_high = exp(ci[, 2]),
-    row.names   = NULL,
+    row.names = NULL,
     stringsAsFactors = FALSE
   )
 }
@@ -149,7 +173,7 @@ tidy_cluster <- function(model, cluster, hypothesis, outcome) {
     irr         = exp(ct[, "Estimate"]),
     irr_ci_low  = exp(ct[, "Estimate"] - 1.96 * ct[, "Std. Error"]),
     irr_ci_high = exp(ct[, "Estimate"] + 1.96 * ct[, "Std. Error"]),
-    row.names   = NULL,
+    row.names = NULL,
     stringsAsFactors = FALSE
   )
 }
@@ -185,6 +209,24 @@ compare_sig <- function(conv, cl, label) {
   invisible(m)
 }
 
+# Shared variable definitions -------------------------------------------
+
+engagement_cols <- c("like_count", "quote_count", "retweet_count", "reply_count")
+
+discrim_all <- c(
+  "discrim_job", "discrim_attitude", "discrim_engagement",
+  "discrim_sexIdent", "discrim_characteristics", "discrim_nation",
+  "discrim_religion", "discrim_socialStatus", "discrim_worldview",
+  "discrim_Ethnicity"
+)
+
+# Excluded from the main analysis: sexual identity, social
+# status, worldview (very low base rates)
+discrim_included <- setdiff(
+  discrim_all,
+  c("discrim_sexIdent", "discrim_socialStatus", "discrim_worldview")
+)
+
 # ------------------------------------------------------------
 # 1. Load database
 # ------------------------------------------------------------
@@ -212,6 +254,7 @@ db_tables <- setNames(
   }),
   table_names
 )
+
 dbDisconnect(dbconnect)
 
 Annotations  <- db_tables$Annotations
@@ -221,35 +264,37 @@ Comments     <- db_tables$Comments
 lapply(db_tables, head)
 
 # Validate tables and columns the analysis depends on
-discrim_all <- c(
-  "discrim_job", "discrim_attitude", "discrim_engagement",
-  "discrim_sexIdent", "discrim_characteristics", "discrim_nation",
-  "discrim_religion", "discrim_socialStatus", "discrim_worldview",
-  "discrim_Ethnicity"
-)
-engagement_cols <- c("like_count", "quote_count", "retweet_count", "reply_count")
-
 stopifnot(all(discrim_all %in% colnames(Annotations)))
 stopifnot(all(c("c_id", "hate_speech", discrim_all) %in% colnames(Goldstandard)))
 stopifnot(all(c("c_id", "date", "conv_id", engagement_cols) %in% colnames(Comments)))
 stopifnot(sum(duplicated(Comments$c_id)) == 0)
 
 # ------------------------------------------------------------
-# 1b. Exposure: reference time and comment age
+# 2. Exposure: reference time and comment age
 # ------------------------------------------------------------
 
 collection_time <- max(parse_ts(Comments$date), na.rm = TRUE)
 print(collection_time)
 
+# Comment age on the full Comments table (shared definition; used by
+# the descriptive tables in section 4)
 Comments <- Comments %>%
-  mutate(posted_at = parse_ts(date))
+  mutate(
+    posted_at = parse_ts(date),
+    age_days  = as.numeric(difftime(collection_time, posted_at,
+                                    units = "days")),
+    age_days  = pmax(age_days, 1/24), # prevents log(0)
+    log_age   = log(age_days)
+  )
 
-sum(is.na(Comments$posted_at))  # parsing failures: must be 0
-summary(as.numeric(difftime(collection_time, Comments$posted_at,
-                            units = "days")))
+sum(is.na(Comments$posted_at)) # parsing failures: must be 0
+summary(Comments$age_days)
+
+# Only comments with complete engagement data (for the descriptives)
+Comments_complete <- Comments %>% filter_complete_engagement()
 
 # ------------------------------------------------------------
-# 2. Summary of discrimination variables
+# 3. Summary of discrimination variables
 # ------------------------------------------------------------
 
 discrim_counts_annotations <- sapply(
@@ -258,17 +303,167 @@ discrim_counts_annotations <- sapply(
 discrim_counts_goldstandard <- sapply(
   Goldstandard[discrim_all], function(x) sum(x > 0.5, na.rm = TRUE)
 )
+
 print(discrim_counts_annotations)
 print(discrim_counts_goldstandard)
 
 # ------------------------------------------------------------
-# 3. Regression dataset
+# 4. Descriptive tables (Tables 1-3)
 # ------------------------------------------------------------
 
-discrim_included <- setdiff(
-  discrim_all,
-  c("discrim_sexIdent", "discrim_socialStatus", "discrim_worldview")
+# ---- Table 1: engagement by hate-speech classification ----
+
+hate_comparison_desc <- Goldstandard %>%
+  mutate(
+    hate_speech_binary = case_when(
+      is.na(hate_speech)   ~ NA_integer_,
+      hate_speech > 0.5    ~ 1L,
+      TRUE                 ~ 0L
+    )
+  ) %>%
+  dplyr::select(c_id, hate_speech_binary) %>%
+  inner_join(
+    Comments_complete %>%
+      dplyr::select(c_id, all_of(engagement_cols), age_days, log_age),
+    by = "c_id"
+  ) %>%
+  mutate(
+    hate_speech_group = case_when(
+      hate_speech_binary == 0      ~ "Non-hate speech",
+      hate_speech_binary == 1      ~ "Hate speech",
+      is.na(hate_speech_binary)    ~ "No classification"
+    ),
+    hate_speech_group = factor(
+      hate_speech_group,
+      levels = c("Non-hate speech", "Hate speech", "No classification")
+    )
+  )
+
+hate_table <- summarise_engagement_desc(hate_comparison_desc, "hate_speech_group") %>%
+  rename(group = hate_speech_group) %>%
+  dplyr::select(
+    group, n_comments,
+    mean_likes, median_likes,
+    mean_retweets, median_retweets,
+    mean_replies, median_replies,
+    mean_quotes, median_quotes,
+    mean_age_days, median_age_days
+  )
+
+cat("\n==========================================\n")
+cat("TABLE 1: ENGAGEMENT BY HATE-SPEECH STATUS\n")
+cat("==========================================\n\n")
+print(hate_table, width = Inf)
+# Expected n: 9,056 / 1,115 / 107
+
+# ---- Table 2: engagement by discrimination category ----
+# (hate-speech subsample, included discrimination types only)
+
+hate_subsample <- Goldstandard %>%
+  filter(hate_speech > 0.5) %>%
+  dplyr::select(c_id, all_of(discrim_included)) %>%
+  mutate(across(all_of(discrim_included), ~ as.integer(. > 0.5))) %>%
+  inner_join(
+    Comments_complete %>%
+      dplyr::select(c_id, all_of(engagement_cols), age_days, log_age),
+    by = "c_id"
+  ) %>%
+  mutate(
+    n_discrim_types = rowSums(across(all_of(discrim_included)), na.rm = TRUE),
+    discrimination_category = case_when(
+      n_discrim_types == 0 ~ "No included discrimination type",
+      n_discrim_types == 1 ~ "One discrimination type",
+      n_discrim_types >= 2 ~ "Multiple discrimination types"
+    ),
+    discrimination_category = factor(
+      discrimination_category,
+      levels = c("No included discrimination type",
+                 "One discrimination type",
+                 "Multiple discrimination types")
+    )
+  )
+
+discrimination_table <- summarise_engagement_desc(
+  hate_subsample, "discrimination_category"
+) %>%
+  rename(group = discrimination_category) %>%
+  dplyr::select(
+    group, n_comments,
+    mean_likes, median_likes,
+    mean_retweets, median_retweets,
+    mean_replies, median_replies,
+    mean_quotes, median_quotes,
+    mean_age_days, median_age_days
+  )
+
+cat("\n===============================================\n")
+cat("TABLE 2: ENGAGEMENT BY DISCRIMINATION CATEGORY\n")
+cat("===============================================\n\n")
+print(discrimination_table, width = Inf)
+# Expected n: 248 / 738 / 129
+
+# ---- Table 3: frequency of each discrimination type ----
+
+discrimination_frequency_table <- data.frame(
+  discrimination_type = discrim_included,
+  n_comments = sapply(
+    hate_subsample[discrim_included],
+    function(x) sum(x == 1, na.rm = TRUE)
+  )
+) %>%
+  mutate(percentage = 100 * n_comments / nrow(hate_subsample)) %>%
+  arrange(desc(n_comments)) %>%
+  mutate(
+    # dplyr:: prefix required: car::recode masks dplyr::recode
+    discrimination_type = dplyr::recode(
+      discrimination_type,
+      discrim_job         = "Job or occupation",
+      discrim_attitude    = "Attitude",
+      discrim_engagement  = "Engagement or participation",
+      discrim_characteristics = "Characteristics",
+      discrim_nation      = "Nationality",
+      discrim_religion    = "Religion",
+      discrim_Ethnicity   = "Ethnicity"
+    )
+  )
+
+cat("\n===============================================\n")
+cat("TABLE 3: FREQUENCY OF DISCRIMINATION TYPES\n")
+cat("===============================================\n\n")
+print(discrimination_frequency_table, row.names = FALSE)
+
+# ---- Optional: save the three tables as CSV files ----
+
+output_folder <- "descriptive_tables"
+
+if (!dir.exists(output_folder)) {
+  dir.create(output_folder)
+}
+
+write.csv2(
+  hate_table,
+  file = file.path(output_folder, "table_1_engagement_by_hate_speech.csv"),
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
 )
+write.csv2(
+  discrimination_table,
+  file = file.path(output_folder, "table_2_engagement_by_discrimination_category.csv"),
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+write.csv2(
+  discrimination_frequency_table,
+  file = file.path(output_folder, "table_3_discrimination_frequencies.csv"),
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+cat("\nThe three tables were saved in the folder 'descriptive_tables'.\n")
+
+# ------------------------------------------------------------
+# 5. Regression dataset (hate-speech subsample)
+# ------------------------------------------------------------
 
 mod_Goldstandard <- Goldstandard %>%
   filter(hate_speech > 0.5) %>%
@@ -281,12 +476,12 @@ mod_Goldstandard <- Goldstandard %>%
   add_exposure(collection_time)
 
 sum(is.na(mod_Goldstandard$like_count))
-sum(is.na(mod_Goldstandard$posted_at))  # must be 0
+sum(is.na(mod_Goldstandard$posted_at)) # must be 0
 mod_Goldstandard <- filter_complete_engagement(mod_Goldstandard)
 nrow(mod_Goldstandard)
 
 # ------------------------------------------------------------
-# 4. Poisson vs. negative binomial, with exposure
+# 6. Poisson vs. negative binomial, with exposure
 # ------------------------------------------------------------
 
 poisson_models <- fit_poisson_all(discrim_included, mod_Goldstandard,
@@ -315,7 +510,7 @@ AIC(poisson_models$quotes,   nb_models$quotes)
 irr_table(nb_models)
 
 # ------------------------------------------------------------
-# 5. Baseline and excluded-type checks
+# 7. Baseline and excluded-type checks
 # ------------------------------------------------------------
 
 baseline_comments <- mod_Goldstandard %>%
@@ -350,7 +545,7 @@ cor(mod_Goldstandard_clean[, c("discrim_nation",
                                "discrim_Ethnicity")])
 
 # ------------------------------------------------------------
-# 6. Single vs. multiple discrimination types (H2 / H4)
+# 8. Single vs. multiple discrimination types (H2 / H4)
 # ------------------------------------------------------------
 
 mod_Goldstandard <- mod_Goldstandard %>%
@@ -393,7 +588,7 @@ lapply(single_ref_models, summary)
 irr_table(single_ref_models)
 
 # ------------------------------------------------------------
-# 7. Hate speech vs. non-hate speech (H1)
+# 9. Hate speech vs. non-hate speech (H1)
 # ------------------------------------------------------------
 
 hate_comparison <- Goldstandard %>%
@@ -429,12 +624,12 @@ lrtest_all(poisson_hate, hate_models)
 irr_table(hate_models)
 
 # ------------------------------------------------------------
-# 8. Results tables with Holm adjustment
+# 10. Results tables with Holm adjustment
 # ------------------------------------------------------------
 
-results_h1 <- build_results(hate_models,       "H1")
-results_h2 <- build_results(category_models,   "H2")
-results_h3 <- build_results(nb_models,         "H3")
+results_h1 <- build_results(hate_models, "H1")
+results_h2 <- build_results(category_models, "H2")
+results_h3 <- build_results(nb_models, "H3")
 results_h4 <- build_results(single_ref_models, "H4")
 
 results_all <- rbind(results_h1, results_h2, results_h3, results_h4)
@@ -443,15 +638,15 @@ results_all <- rbind(results_h1, results_h2, results_h3, results_h4)
 results_focal <- results_all %>% filter(!is_control)
 
 # ------------------------------------------------------------
-# 9. ALL HYPOTHESIS OUTPUTS IN ONE PLACE 
+# 11. ALL HYPOTHESIS OUTPUTS IN ONE PLACE
 # ------------------------------------------------------------
 
 # ---- H1: hate speech vs. non-hate speech --------------------
 cat("\n########## H1: hate speech vs. non-hate speech ##########\n")
-lapply(hate_models, summary)                 # coefficients, z, p, theta, AIC
-irr_table(hate_models)                       # IRRs + 95% profile CIs
-print(engagement_by_hate)                    # descriptives
-table(hate_comparison$hate_speech_binary)    # group sizes
+lapply(hate_models, summary)       # coefficients, z, p, theta, AIC
+irr_table(hate_models)             # IRRs + 95% profile CIs
+print(engagement_by_hate)          # descriptives
+table(hate_comparison$hate_speech_binary) # group sizes
 
 # ---- H2: discrimination breadth, reference = "none" ---------
 cat("\n########## H2: tagged vs. non-tagged (ref = none) ##########\n")
@@ -473,7 +668,7 @@ round(cbind(
   quotes   = exp(coef(nb_models$quotes))[-1]
 ), 3)
 
-vif(nb_models$likes)                         # collinearity check
+vif(nb_models$likes) # collinearity check
 
 # ---- H4: multiple vs. single, reference = "single" ----------
 cat("\n########## H4: multiple vs. single (ref = single) ##########\n")
@@ -485,7 +680,7 @@ cat("\n########## Holm-adjusted focal results ##########\n")
 print(results_focal)
 
 # ------------------------------------------------------------
-# 10. Figures (saved as PNGs)
+# 12. Figures (saved as PNGs)
 # ------------------------------------------------------------
 
 outcome_levels <- c("likes", "retweets", "replies", "quotes")
@@ -549,7 +744,7 @@ print(fig_breadth)
 ggsave("fig_h2h4_breadth_irr.png", fig_breadth, width = 7, height = 4.5, dpi = 300)
 
 # ------------------------------------------------------------
-# 11. Sensitivity: comments old enough that engagement plateaued
+# 13. Sensitivity: comments old enough that engagement plateaued
 # ------------------------------------------------------------
 
 plateau_cutoff_days <- 30
@@ -561,18 +756,18 @@ nb_models_plateau <- fit_nb_all(discrim_included, mod_plateau,
 lapply(nb_models_plateau, summary)
 
 # ------------------------------------------------------------
-# 12. Appendix: exploratory conversation-clustered robustness
+# 14. Appendix: exploratory conversation-clustered robustness
 # ------------------------------------------------------------
 # Reported in the paper's Limitations section only.
 # Estimates are unchanged by construction; only SEs differ.
 
-length(unique(mod_Goldstandard$cluster_id))   # conversations, hate subsample
-length(unique(hate_comparison$cluster_id))    # conversations, full sample
-table(table(mod_Goldstandard$cluster_id))     # cluster-size distribution
+length(unique(mod_Goldstandard$cluster_id)) # conversations, hate subsample
+length(unique(hate_comparison$cluster_id))  # conversations, full sample
+table(table(mod_Goldstandard$cluster_id))   # cluster-size distribution
 
-results_h1_cl <- build_results(hate_models,       "H1", hate_comparison$cluster_id)
-results_h2_cl <- build_results(category_models,   "H2", mod_Goldstandard$cluster_id)
-results_h3_cl <- build_results(nb_models,         "H3", mod_Goldstandard$cluster_id)
+results_h1_cl <- build_results(hate_models, "H1", hate_comparison$cluster_id)
+results_h2_cl <- build_results(category_models, "H2", mod_Goldstandard$cluster_id)
+results_h3_cl <- build_results(nb_models, "H3", mod_Goldstandard$cluster_id)
 results_h4_cl <- build_results(single_ref_models, "H4", mod_Goldstandard$cluster_id)
 
 results_all_cluster <- rbind(results_h1_cl, results_h2_cl,
@@ -588,5 +783,3 @@ compare_sig(results_h4, results_h4_cl, "H4")
 
 # Reproducibility record
 sessionInfo()
-
-
